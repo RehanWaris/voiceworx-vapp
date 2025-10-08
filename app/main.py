@@ -10,6 +10,10 @@ from .db import Base, engine, SessionLocal
 from . import models
 from .security import hash_pw, verify_pw, make_token, SECRET, ALGO
 
+import os
+os.makedirs("uploads", exist_ok=True)
+
+
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='V‑app (Voiceworx)')
 app.mount('/uploads', StaticFiles(directory='uploads'), name='uploads')
