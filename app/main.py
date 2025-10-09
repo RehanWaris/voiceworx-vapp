@@ -1,11 +1,11 @@
 from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, text
 from datetime import datetime, date, time
 from jose import jwt, JWTError
-import os, shutil
+import os, shutil, csv, io
 
 from .db import Base, engine, SessionLocal
 from . import models
@@ -21,7 +21,6 @@ app = FastAPI(title="V-app (Voiceworx)")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 templates = Jinja2Templates(directory="app/templates")
 
-
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -31,7 +30,6 @@ def get_db():
         yield d
     finally:
         d.close()
-
 
 def current_user(request: Request, d):
     token = request.cookies.get("t")
@@ -45,7 +43,6 @@ def current_user(request: Request, d):
         return None
     return d.execute(select(models.User).where(models.User.email == email)).scalar_one_or_none()
 
-
 def require_user(request: Request):
     d = SessionLocal()
     try:
@@ -56,7 +53,6 @@ def require_user(request: Request):
     finally:
         d.close()
 
-
 # -----------------------------------------------------------------------------
 # Routes: Home / Auth
 # -----------------------------------------------------------------------------
@@ -64,11 +60,9 @@ def require_user(request: Request):
 def home(request: Request):
     return templates.TemplateResponse("home.html", {"request": request})
 
-
 @app.get("/auth/register", response_class=HTMLResponse)
 def reg_form(request: Request):
     return templates.TemplateResponse("register.html", {"request": request})
-
 
 @app.post("/auth/register")
 def reg(name: str = Form(...), email: str = Form(...), password: str = Form(...)):
@@ -84,11 +78,9 @@ def reg(name: str = Form(...), email: str = Form(...), password: str = Form(...)
     finally:
         d.close()
 
-
 @app.get("/auth/login", response_class=HTMLResponse)
 def login_form(request: Request):
     return templates.TemplateResponse("login.html", {"request": request})
-
 
 @app.post("/auth/login")
 def login(email: str = Form(...), password: str = Form(...)):
@@ -102,7 +94,6 @@ def login(email: str = Form(...), password: str = Form(...)):
         return resp
     finally:
         d.close()
-
 
 # -----------------------------------------------------------------------------
 # Dashboard
@@ -119,12 +110,10 @@ def dash(request: Request):
     finally:
         d.close()
 
-
 # -----------------------------------------------------------------------------
 # Attendance
 # -----------------------------------------------------------------------------
 LATE_AFTER = time(10, 31)
-
 
 def _month_late_and_paycut(d, user_id: int):
     late_count = d.execute(
@@ -138,7 +127,6 @@ def _month_late_and_paycut(d, user_id: int):
     late_count = int(late_count or 0)
     return late_count, late_count // 4
 
-
 def _serialize_row(row):
     if not row:
         return None
@@ -150,6 +138,8 @@ def _serialize_row(row):
         "check_in_photo": f"/{m.get('cin_photo')}" if m.get("cin_photo") else None,
         "check_out_photo": f"/{m.get('cout_photo')}" if m.get("cout_photo") else None,
         "status": m.get("status"),
+        "cin_remark": m.get("cin_remark"),
+        "cout_remark": m.get("cout_remark"),
     }
     try:
         if r["check_in_ts"] and r["check_out_ts"]:
@@ -162,22 +152,22 @@ def _serialize_row(row):
         r["working_hours"] = None
     return r
 
-
 @app.get("/attendance", response_class=HTMLResponse)
 def attendance_page(request: Request):
     u = require_user(request)
     return templates.TemplateResponse("attendance.html", {"request": request, "user": u})
-
 
 @app.get("/attendance/today")
 def attendance_today(request: Request):
     u = require_user(request)
     d = SessionLocal()
     try:
-        rec = d.execute(text("SELECT * FROM attendance WHERE user_id=:u AND date=:dt"), {"u": u.id, "dt": date.today()}).fetchone()
+        rec = d.execute(text("SELECT * FROM attendance WHERE user_id=:u AND date=:dt"),
+                        {"u": u.id, "dt": date.today()}).fetchone()
         record = _serialize_row(rec)
         late_count, paycut = _month_late_and_paycut(d, u.id)
-        points_total = d.execute(text("SELECT COALESCE(SUM(pts),0) FROM points WHERE user_id=:u"), {"u": u.id}).scalar()
+        points_total = d.execute(text("SELECT COALESCE(SUM(pts),0) FROM points WHERE user_id=:u"),
+                                 {"u": u.id}).scalar()
         return {
             "ok": True,
             "record": record,
@@ -188,24 +178,49 @@ def attendance_today(request: Request):
     finally:
         d.close()
 
+# SERVER-SIDE GUARDS to prevent double actions:
+def _has_checkin_today(d, user_id: int):
+    return bool(d.execute(text("SELECT 1 FROM attendance WHERE user_id=:u AND date=:dt AND cin_ts IS NOT NULL"),
+                          {"u": user_id, "dt": date.today()}).fetchone())
+
+def _has_checkout_today(d, user_id: int):
+    return bool(d.execute(text("SELECT 1 FROM attendance WHERE user_id=:u AND date=:dt AND cout_ts IS NOT NULL"),
+                          {"u": user_id, "dt": date.today()}).fetchone())
 
 @app.post("/attendance/checkin")
-def checkin(request: Request, file: UploadFile = File(...), lat: float = Form(None), lng: float = Form(None)):
+def checkin(
+    request: Request,
+    file: UploadFile = File(...),
+    lat: float = Form(None),
+    lng: float = Form(None),
+    remarks: str = Form(None)  # NEW
+):
     u = require_user(request)
+    d = SessionLocal()
+    try:
+        # Guard: block second check-in
+        if _has_checkin_today(d, u.id):
+            if "json" in (request.headers.get("accept") or "").lower():
+                return {"ok": False, "error": "Already checked in today"}
+            return RedirectResponse("/attendance?already_in=1", status_code=302)
+    finally:
+        d.close()
+
     os.makedirs("uploads/attendance", exist_ok=True)
     fn = f"uploads/attendance/{u.id}_{date.today().isoformat()}_in.jpg"
     with open(fn, "wb") as f:
         shutil.copyfileobj(file.file, f)
     now = datetime.now()
     status = "LATE" if now.time() >= LATE_AFTER and now.weekday() <= 5 else "PRESENT"
+
     d = SessionLocal()
     try:
         d.execute(
             text(
-                "INSERT OR REPLACE INTO attendance (id,user_id,date,cin_ts,cin_lat,cin_lng,cin_photo,status) "
-                "VALUES ((SELECT id FROM attendance WHERE user_id=:u AND date=:dt),:u,:dt,:ts,:lat,:lng,:ph,:st)"
+                "INSERT OR REPLACE INTO attendance (id,user_id,date,cin_ts,cin_lat,cin_lng,cin_photo,status,cin_remark) "
+                "VALUES ((SELECT id FROM attendance WHERE user_id=:u AND date=:dt),:u,:dt,:ts,:lat,:lng,:ph,:st,:r)"
             ),
-            {"u": u.id, "dt": date.today(), "ts": now, "lat": lat, "lng": lng, "ph": fn, "st": status},
+            {"u": u.id, "dt": date.today(), "ts": now, "lat": lat, "lng": lng, "ph": fn, "st": status, "r": remarks},
         )
         pts = -5 if status == "LATE" else 10
         d.execute(
@@ -229,35 +244,56 @@ def checkin(request: Request, file: UploadFile = File(...), lat: float = Form(No
         }
     return RedirectResponse("/attendance?in=1", status_code=302)
 
-
 @app.post("/attendance/checkout")
-def checkout(request: Request, file: UploadFile = File(...), lat: float = Form(None), lng: float = Form(None)):
+def checkout(
+    request: Request,
+    file: UploadFile = File(...),
+    lat: float = Form(None),
+    lng: float = Form(None),
+    remarks: str = Form(None)  # NEW
+):
     u = require_user(request)
+    d = SessionLocal()
+    try:
+        # Guard: need check-in first; block second checkout
+        if not _has_checkin_today(d, u.id):
+            if "json" in (request.headers.get("accept") or "").lower():
+                return {"ok": False, "error": "No check-in found for today"}
+            return RedirectResponse("/attendance?no_in=1", status_code=302)
+        if _has_checkout_today(d, u.id):
+            if "json" in (request.headers.get("accept") or "").lower():
+                return {"ok": False, "error": "Already checked out today"}
+            return RedirectResponse("/attendance?already_out=1", status_code=302)
+    finally:
+        d.close()
+
     os.makedirs("uploads/attendance", exist_ok=True)
     fn = f"uploads/attendance/{u.id}_{date.today().isoformat()}_out.jpg"
     with open(fn, "wb") as f:
         shutil.copyfileobj(file.file, f)
     now = datetime.now()
+
     d = SessionLocal()
     try:
         d.execute(
             text(
-                "UPDATE attendance SET cout_ts=:ts, cout_lat=:lat, cout_lng=:lng, cout_photo=:ph "
+                "UPDATE attendance SET cout_ts=:ts, cout_lat=:lat, cout_lng=:lng, cout_photo=:ph, cout_remark=:r "
                 "WHERE user_id=:u AND date=:dt"
             ),
-            {"ts": now, "lat": lat, "lng": lng, "ph": fn, "u": u.id, "dt": date.today()},
+            {"ts": now, "lat": lat, "lng": lng, "ph": fn, "r": remarks, "u": u.id, "dt": date.today()},
         )
         d.execute(
             text("INSERT INTO points (user_id,category,descr,pts,created_at) VALUES (:u,:c,:d,:p,:t)"),
             {"u": u.id, "c": "ATTENDANCE", "d": "Check-out", "p": 10, "t": now},
         )
-        rec = d.execute(text("SELECT cin_ts, cout_ts FROM attendance WHERE user_id=:u AND date=:dt"), {"u": u.id, "dt": date.today()}).fetchone()
+        rec = d.execute(
+            text("SELECT cin_ts, cout_ts FROM attendance WHERE user_id=:u AND date=:dt"),
+            {"u": u.id, "dt": date.today()},
+        ).fetchone()
         hours = None
         if rec and rec._mapping.get("cin_ts") and rec._mapping.get("cout_ts"):
-            t1 = rec._mapping["cin_ts"]
-            t2 = rec._mapping["cout_ts"]
-            diff = (t2 - t1).total_seconds()
-            hours = round(diff / 3600, 2)
+            t1 = rec._mapping["cin_ts"]; t2 = rec._mapping["cout_ts"]
+            hours = round((t2 - t1).total_seconds() / 3600, 2)
         d.commit()
         late_count, paycut = _month_late_and_paycut(d, u.id)
     finally:
@@ -275,7 +311,6 @@ def checkout(request: Request, file: UploadFile = File(...), lat: float = Form(N
         }
     return RedirectResponse("/attendance?out=1", status_code=302)
 
-
 # -----------------------------------------------------------------------------
 # Reports
 # -----------------------------------------------------------------------------
@@ -284,11 +319,13 @@ def reports_page(request: Request):
     u = require_user(request)
     d = SessionLocal()
     try:
-        rows = d.execute(text("SELECT report_date, summary FROM reports WHERE user_id=:u ORDER BY report_date DESC"), {"u": u.id}).fetchall()
+        rows = d.execute(
+            text("SELECT report_date, summary FROM reports WHERE user_id=:u ORDER BY report_date DESC"),
+            {"u": u.id}
+        ).fetchall()
         return templates.TemplateResponse("reports.html", {"request": request, "user": u, "rows": rows})
     finally:
         d.close()
-
 
 @app.post("/reports/new")
 def report_new(request: Request, report_date: str = Form(...), summary: str = Form(...)):
@@ -308,15 +345,13 @@ def report_new(request: Request, report_date: str = Form(...), summary: str = Fo
         d.close()
     return RedirectResponse("/reports?ok=1", status_code=302)
 
-
 # -----------------------------------------------------------------------------
-# Recce Uploads
+# Recce
 # -----------------------------------------------------------------------------
 @app.get("/recce", response_class=HTMLResponse)
 def recce_page(request: Request):
     u = require_user(request)
     return templates.TemplateResponse("recce.html", {"request": request, "user": u})
-
 
 @app.post("/recce/upload")
 def recce_upload(request: Request, project: str = Form(None), notes: str = Form(None), file: UploadFile = File(...)):
@@ -340,9 +375,8 @@ def recce_upload(request: Request, project: str = Form(None), notes: str = Form(
         d.close()
     return RedirectResponse("/recce?ok=1", status_code=302)
 
-
 # -----------------------------------------------------------------------------
-# Admin Leaderboard
+# Admin: Leaderboard
 # -----------------------------------------------------------------------------
 @app.get("/admin", response_class=HTMLResponse)
 def admin(request: Request):
@@ -362,26 +396,24 @@ def admin(request: Request):
         d.close()
 
 # -----------------------------------------------------------------------------
-# Admin Attendance Dashboard
+# Admin: Attendance Dashboard + CSV
 # -----------------------------------------------------------------------------
-from fastapi.responses import FileResponse
-import csv, io
-
 @app.get("/admin/attendance", response_class=HTMLResponse)
 def admin_attendance(request: Request, dt: str = None):
     u = require_user(request)
     if u.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+    if not dt:
+        dt = date.today().isoformat()
 
     d = SessionLocal()
     try:
-        if not dt:
-            dt = date.today().isoformat()
         rows = d.execute(text("""
-            SELECT a.date, u.name, u.email, 
-                   a.cin_ts, a.cout_ts, a.status, 
+            SELECT a.date, u.name, u.email,
+                   a.cin_ts, a.cout_ts, a.status,
                    a.cin_photo, a.cout_photo,
-                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng
+                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng,
+                   a.cin_remark, a.cout_remark
             FROM attendance a
             JOIN users u ON a.user_id = u.id
             WHERE a.date = :dt
@@ -403,7 +435,8 @@ def admin_attendance(request: Request, dt: str = None):
                 "cin_photo": f"/{m['cin_photo']}" if m["cin_photo"] else None,
                 "cout_photo": f"/{m['cout_photo']}" if m["cout_photo"] else None,
                 "cin_lat": m["cin_lat"], "cin_lng": m["cin_lng"],
-                "cout_lat": m["cout_lat"], "cout_lng": m["cout_lng"]
+                "cout_lat": m["cout_lat"], "cout_lng": m["cout_lng"],
+                "cin_remark": m["cin_remark"], "cout_remark": m["cout_remark"],
             })
 
         return templates.TemplateResponse("admin_attendance.html",
@@ -411,43 +444,48 @@ def admin_attendance(request: Request, dt: str = None):
     finally:
         d.close()
 
-
 @app.get("/admin/attendance/export")
 def admin_attendance_export(request: Request, dt: str = None):
     u = require_user(request)
     if u.role != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-
     if not dt:
         dt = date.today().isoformat()
+
     d = SessionLocal()
     try:
         rows = d.execute(text("""
             SELECT u.name, u.email, a.date, a.status, a.cin_ts, a.cout_ts,
-                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng
+                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng,
+                   a.cin_remark, a.cout_remark
             FROM attendance a
             JOIN users u ON a.user_id = u.id
             WHERE a.date = :dt
             ORDER BY u.name
         """), {"dt": dt}).fetchall()
+
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Name", "Email", "Date", "Status",
-                         "Check-in Time", "Check-out Time",
-                         "Check-in Lat", "Check-in Lng",
-                         "Check-out Lat", "Check-out Lng"])
+        writer.writerow(["Name","Email","Date","Status",
+                         "Check-in","Check-out","Hours",
+                         "Cin Lat","Cin Lng","Cout Lat","Cout Lng",
+                         "Cin Remark","Cout Remark"])
         for r in rows:
             m = r._mapping
+            hrs = ""
+            if m.get("cin_ts") and m.get("cout_ts"):
+                t1, t2 = m["cin_ts"], m["cout_ts"]
+                hrs = round((t2 - t1).total_seconds()/3600, 2)
             writer.writerow([
                 m["name"], m["email"], m["date"], m["status"],
-                m["cin_ts"], m["cout_ts"],
-                m["cin_lat"], m["cin_lng"],
-                m["cout_lat"], m["cout_lng"]
+                m["cin_ts"], m["cout_ts"], hrs,
+                m["cin_lat"], m["cin_lng"], m["cout_lat"], m["cout_lng"],
+                m["cin_remark"], m["cout_remark"]
             ])
         output.seek(0)
-        return FileResponse(io.BytesIO(output.getvalue().encode()),
-                            media_type='text/csv',
-                            filename=f"attendance_{dt}.csv")
+        return StreamingResponse(iter([output.getvalue().encode()]),
+                                 media_type="text/csv",
+                                 headers={"Content-Disposition": f'attachment; filename="attendance_{dt}.csv"'})
     finally:
         d.close()
 
