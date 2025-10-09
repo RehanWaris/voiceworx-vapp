@@ -102,6 +102,55 @@ def dash(request: Request):
 # Attendance
 LATE_AFTER = time(10, 31)
 
+def _month_late_and_paycut(d, user_id: int):
+    late_count = d.execute(text(
+        "SELECT COUNT(*) FROM attendance "
+        "WHERE user_id=:u AND status='LATE' "
+        "AND strftime('%Y-%m', date)=strftime('%Y-%m','now')"
+    ), {'u': user_id}).scalar()
+    late_count = int(late_count or 0)
+    return late_count, late_count // 4
+
+def _serialize_row(row):
+    if not row: return None
+    m = row._mapping
+    r = {
+        'date': str(m.get('date')) if m.get('date') else None,
+        'check_in_ts': str(m.get('cin_ts')) if m.get('cin_ts') else None,
+        'check_out_ts': str(m.get('cout_ts')) if m.get('cout_ts') else None,
+        'check_in_photo': f"/{m.get('cin_photo')}" if m.get('cin_photo') else None,
+        'check_out_photo': f"/{m.get('cout_photo')}" if m.get('cout_photo') else None,
+        'status': m.get('status'),
+    }
+    # compute hours if both times present
+    try:
+        if r['check_in_ts'] and r['check_out_ts']:
+            t1 = datetime.fromisoformat(r['check_in_ts'])
+            t2 = datetime.fromisoformat(r['check_out_ts'])
+            r['working_hours'] = round((t2 - t1).total_seconds() / 3600, 2)
+        else:
+            r['working_hours'] = None
+    except Exception:
+        r['working_hours'] = None
+    return r
+
+@app.get('/attendance/today')
+def attendance_today(request: Request):
+    u = require_user(request)
+    d = SessionLocal()
+    try:
+        rec = d.execute(text('SELECT * FROM attendance WHERE user_id=:u AND date=:dt'),
+                        {'u': u.id, 'dt': date.today()}).fetchone()
+        record = _serialize_row(rec)
+        late_count, paycut = _month_late_and_paycut(d, u.id)
+        points_total = d.execute(text('SELECT COALESCE(SUM(pts),0) FROM points WHERE user_id=:u'),
+                                 {'u': u.id}).scalar()
+        return {'ok': True, 'record': record, 'late_count': late_count,
+                'paycut_days': paycut, 'points_total': float(points_total or 0)}
+    finally:
+        d.close()
+
+
 @app.get('/attendance', response_class=HTMLResponse)
 def attendance_page(request: Request):
     u = require_user(request)
