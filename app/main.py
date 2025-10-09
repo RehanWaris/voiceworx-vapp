@@ -175,12 +175,24 @@ def checkin(request: Request, file: UploadFile = File(...), lat: float = Form(No
     status = 'LATE' if now.time() >= LATE_AFTER and now.weekday() <= 5 else 'PRESENT'
     d = SessionLocal()
     try:
-        d.execute(text('INSERT OR REPLACE INTO attendance (id,user_id,date,cin_ts,cin_lat,cin_lng,cin_photo,status) VALUES ((SELECT id FROM attendance WHERE user_id=:u AND date=:dt),:u,:dt,:ts,:lat,:lng,:ph,:st)'), {'u': u.id, 'dt': date.today(), 'ts': now, 'lat': lat, 'lng': lng, 'ph': fn, 'st': status})
+        d.execute(text(
+            'INSERT OR REPLACE INTO attendance (id,user_id,date,cin_ts,cin_lat,cin_lng,cin_photo,status) '
+            'VALUES ((SELECT id FROM attendance WHERE user_id=:u AND date=:dt),:u,:dt,:ts,:lat,:lng,:ph,:st)'
+        ), {'u': u.id, 'dt': date.today(), 'ts': now, 'lat': lat, 'lng': lng, 'ph': fn, 'st': status})
         pts = -5 if status == 'LATE' else 10
-        d.execute(text('INSERT INTO points (user_id,category,descr,pts,created_at) VALUES (:u,:c,:d,:p,:t)'), {'u': u.id, 'c': 'ATTENDANCE', 'd': 'Check-in', 'p': pts, 't': now})
+        d.execute(text('INSERT INTO points (user_id,category,descr,pts,created_at) VALUES (:u,:c,:d,:p,:t)'),
+                  {'u': u.id, 'c': 'ATTENDANCE', 'd': 'Check-in', 'p': pts, 't': now})
         d.commit()
+        late_count, paycut = _month_late_and_paycut(d, u.id)
     finally:
         d.close()
+
+    # If Accept: application/json present, return JSON for the JS UI
+    if 'json' in (request.headers.get('accept') or '').lower():
+        return {'ok': True, 'status': status, 'check_in_ts': now.isoformat(),
+                'photo_url': f'/{fn}', 'points_awarded': pts,
+                'late_count': late_count, 'paycut_days': paycut}
+    # Fallback to redirect if someone posts from a plain form
     return RedirectResponse('/attendance?in=1', status_code=302)
 
 @app.post('/attendance/checkout')
@@ -193,12 +205,34 @@ def checkout(request: Request, file: UploadFile = File(...), lat: float = Form(N
     now = datetime.now()
     d = SessionLocal()
     try:
-        d.execute(text('UPDATE attendance SET cout_ts=:ts, cout_lat=:lat, cout_lng=:lng, cout_photo=:ph WHERE user_id=:u AND date=:dt'), {'ts': now, 'lat': lat, 'lng': lng, 'ph': fn, 'u': u.id, 'dt': date.today()})
-        d.execute(text('INSERT INTO points (user_id,category,descr,pts,created_at) VALUES (:u,:c,:d,:p,:t)'), {'u': u.id, 'c': 'ATTENDANCE', 'd': 'Check-out', 'p': 10, 't': now})
+        d.execute(text(
+            'UPDATE attendance SET cout_ts=:ts, cout_lat=:lat, cout_lng=:lng, cout_photo=:ph '
+            'WHERE user_id=:u AND date=:dt'
+        ), {'ts': now, 'lat': lat, 'lng': lng, 'ph': fn, 'u': u.id, 'dt': date.today()})
+        d.execute(text('INSERT INTO points (user_id,category,descr,pts,created_at) VALUES (:u,:c,:d,:p,:t)'),
+                  {'u': u.id, 'c': 'ATTENDANCE', 'd': 'Check-out', 'p': 10, 't': now})
+        # compute hours
+        rec = d.execute(text('SELECT cin_ts, cout_ts FROM attendance WHERE user_id=:u AND date=:dt'),
+                        {'u': u.id, 'dt': date.today()}).fetchone()
+        hours = None
+        if rec and rec._mapping.get('cin_ts') and rec._mapping.get('cout_ts'):
+            t1 = rec._mapping['cin_ts']; t2 = rec._mapping['cout_ts']
+            # they come back as datetime objects from SQLite driver
+            diff = (t2 - t1).total_seconds()
+            hours = round(diff / 3600, 2)
         d.commit()
+        late_count, paycut = _month_late_and_paycut(d, u.id)
     finally:
         d.close()
+
+    if 'json' in (request.headers.get('accept') or '').lower():
+        return {'ok': True, 'check_out_ts': now.isoformat(), 'photo_url': f'/{fn}',
+                'working_hours': hours, 'points_awarded': 10,
+                'late_count': late_count, 'paycut_days': paycut}
     return RedirectResponse('/attendance?out=1', status_code=302)
+
+
+
 
 # Reports
 @app.get('/reports', response_class=HTMLResponse)
