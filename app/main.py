@@ -105,7 +105,8 @@ LATE_AFTER = time(10, 31)
 @app.get('/attendance', response_class=HTMLResponse)
 def attendance_page(request: Request):
     u = require_user(request)
-    d = SessionLocal()
+    return templates.TemplateResponse('attendance.html', {'request': request, 'user': u})
+
     try:
         rec = d.execute(text('SELECT * FROM attendance WHERE user_id=:u AND date=:dt'), {'u': u.id, 'dt': date.today()}).fetchone()
         late_count = d.execute(text("SELECT COUNT(*) FROM attendance WHERE user_id=:u AND status='LATE' AND strftime('%Y-%m', date)=strftime('%Y-%m','now')"), {'u': u.id}).scalar()
