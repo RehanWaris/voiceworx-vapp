@@ -9,6 +9,7 @@ from jose import jwt, JWTError
 from .db import Base, engine, SessionLocal
 from . import models
 from .security import hash_pw, verify_pw, make_token, SECRET, ALGO
+from sqlalchemy import text
 
 import os
 os.makedirs("uploads", exist_ok=True)
