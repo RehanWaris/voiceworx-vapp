@@ -1,1 +1,56 @@
 
+{% extends 'base.html' %}
+{% block c %}
+<h1 class="text-xl font-semibold mb-4">Admin: Attendance Dashboard</h1>
+
+<form method="get" action="/admin/attendance" class="flex gap-3 mb-4">
+  <input type="date" name="dt" value="{{ date }}" class="border rounded px-3 py-1">
+  <button class="px-4 py-1 bg-blue-600 text-white rounded">Filter</button>
+  <a href="/admin/attendance/export?dt={{ date }}" class="px-4 py-1 bg-green-600 text-white rounded">Export CSV</a>
+</form>
+
+<table class="table-auto w-full text-sm border-collapse border">
+  <thead>
+    <tr class="bg-gray-200">
+      <th class="border p-2">Name</th>
+      <th class="border p-2">Status</th>
+      <th class="border p-2">Check-in</th>
+      <th class="border p-2">Check-out</th>
+      <th class="border p-2">Hours</th>
+      <th class="border p-2">Photos</th>
+      <th class="border p-2">Map</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr class="hover:bg-gray-50">
+      <td class="border p-2">{{ r.name }}</td>
+      <td class="border p-2 {% if r.status=='LATE' %}text-red-600{% else %}text-green-600{% endif %}">{{ r.status }}</td>
+      <td class="border p-2">{{ r.cin or '' }}</td>
+      <td class="border p-2">{{ r.cout or '' }}</td>
+      <td class="border p-2">{{ r.hrs or '-' }}</td>
+      <td class="border p-2">
+        {% if r.cin_photo %}
+          <a href="{{ r.cin_photo }}" target="_blank"><img src="{{ r.cin_photo }}" class="w-16 h-16 object-cover rounded border mb-1"></a>
+        {% endif %}
+        {% if r.cout_photo %}
+          <a href="{{ r.cout_photo }}" target="_blank"><img src="{{ r.cout_photo }}" class="w-16 h-16 object-cover rounded border"></a>
+        {% endif %}
+      </td>
+      <td class="border p-2 text-center">
+        {% if r.cin_lat %}
+        <a href="https://maps.google.com/?q={{ r.cin_lat }},{{ r.cin_lng }}" target="_blank" class="text-blue-600 underline">Check-in Map</a><br>
+        {% endif %}
+        {% if r.cout_lat %}
+        <a href="https://maps.google.com/?q={{ r.cout_lat }},{{ r.cout_lng }}" target="_blank" class="text-blue-600 underline">Check-out Map</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if not rows %}
+<p class="mt-4 text-gray-600 italic">No attendance records for {{ date }}</p>
+{% endif %}
+{% endblock %}
