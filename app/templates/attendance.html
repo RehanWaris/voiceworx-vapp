@@ -3,7 +3,6 @@
 <h1 class="text-xl font-semibold mb-3">Attendance Portal</h1>
 
 <div id="statusBox" class="mb-4 text-sm text-gray-700">
-  <p><b>Date:</b> {{ now().strftime("%d %b %Y") if now else '' }}</p>
   <p id="summaryText">Loading today’s attendance...</p>
 </div>
 
@@ -14,14 +13,14 @@
 
 <canvas id="canvas" width="320" height="240" class="hidden"></canvas>
 
-<div id="actions" class="flex gap-3 mt-4">
-  <button id="checkinBtn" class="bg-green-600 text-white px-4 py-2 rounded">Check-In</button>
-  <button id="checkoutBtn" class="bg-red-600 text-white px-4 py-2 rounded">Check-Out</button>
-</div>
-
-<div class="mt-4">
+<div class="mt-3">
   <textarea id="remarks" rows="3" placeholder="Optional: add remark or note for today..."
     class="border w-full rounded p-2 text-sm"></textarea>
+</div>
+
+<div id="actions" class="flex gap-3 mt-3">
+  <button id="checkinBtn" class="bg-green-600 text-white px-4 py-2 rounded">Check-In</button>
+  <button id="checkoutBtn" class="bg-red-600 text-white px-4 py-2 rounded">Check-Out</button>
 </div>
 
 <div id="result" class="mt-4 text-sm"></div>
@@ -30,18 +29,18 @@
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const captureBtn = document.getElementById("captureBtn");
+const result = document.getElementById("result");
+const checkinBtn = document.getElementById("checkinBtn");
+const checkoutBtn = document.getElementById("checkoutBtn");
 let currentAction = null;
 let currentBlob = null;
 
-// --- Camera setup ---
 async function setupCamera() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
     video.srcObject = stream;
-    document.getElementById('videoSection').classList.remove('hidden');
-  } catch (err) {
-    alert("Camera access denied. Please allow camera.");
-  }
+    document.getElementById("videoSection").classList.remove("hidden");
+  } catch (e) { alert("Camera blocked. Please allow camera permissions."); }
 }
 
 captureBtn.onclick = () => {
@@ -49,86 +48,67 @@ captureBtn.onclick = () => {
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   canvas.toBlob(blob => {
     currentBlob = blob;
-    document.getElementById('videoSection').classList.add('hidden');
-    document.getElementById('result').innerHTML =
-      `<p class='text-green-700'>Photo captured ✅ Ready to submit.</p>`;
+    document.getElementById("videoSection").classList.add("hidden");
+    result.innerHTML = "<p class='text-green-700'>Photo captured ✅</p>";
     submitAttendance();
-  }, "image/jpeg");
+  }, "image/jpeg", 0.9);
 };
 
-// --- Attendance ---
+navigator.geolocation.getCurrentPosition(
+  pos => { window._lat = pos.coords.latitude; window._lng = pos.coords.longitude; },
+  () => {}, { enableHighAccuracy: true, timeout: 8000 }
+);
+
+checkinBtn.onclick = () => { currentAction = "checkin"; setupCamera(); };
+checkoutBtn.onclick = () => { currentAction = "checkout"; setupCamera(); };
+
 async function submitAttendance() {
   if (!currentAction || !currentBlob) return;
-  const formData = new FormData();
-  formData.append("file", currentBlob, `${currentAction}.jpg`);
-  formData.append("lat", window._lat || "");
-  formData.append("lng", window._lng || "");
-  formData.append("remarks", document.getElementById("remarks").value || "");
+  const fd = new FormData();
+  fd.append("file", currentBlob, `${currentAction}.jpg`);
+  fd.append("lat", window._lat || "");
+  fd.append("lng", window._lng || "");
+  fd.append("remarks", document.getElementById("remarks").value || "");
 
-  const url = `/attendance/${currentAction}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { Accept: "application/json" },
-    body: formData
+  const res = await fetch(`/attendance/${currentAction}`, {
+    method: "POST", headers: { "Accept": "application/json" }, body: fd
   });
   const data = await res.json();
-  if (data.ok) {
-    document.getElementById("result").innerHTML =
-      `<p class='text-blue-700 font-medium'>
-         ${currentAction === 'checkin' ? 'Check-in' : 'Check-out'} successful!<br>
-         Time: ${new Date().toLocaleTimeString()}<br>
-         Points: +${data.points_awarded}
-       </p>`;
-    loadStatus();
-  } else {
-    alert("Error submitting attendance");
+  if (!data.ok) {
+    alert(data.error || "Failed");
+    return;
   }
-  currentBlob = null;
-  currentAction = null;
+  result.innerHTML = `<div class="text-blue-700">Success! Points: +${data.points_awarded}</div>`;
+  await loadStatus();
 }
 
-// --- Location ---
-navigator.geolocation.getCurrentPosition(pos => {
-  window._lat = pos.coords.latitude;
-  window._lng = pos.coords.longitude;
-}, () => console.log("Location denied"));
-
-// --- Buttons ---
-document.getElementById("checkinBtn").onclick = () => {
-  currentAction = "checkin";
-  setupCamera();
-};
-document.getElementById("checkoutBtn").onclick = () => {
-  currentAction = "checkout";
-  setupCamera();
-};
-
-// --- Load daily status ---
 async function loadStatus() {
-  const res = await fetch("/attendance/today");
-  const data = await res.json();
-  if (data.ok && data.record) {
-    const r = data.record;
+  const r = await fetch("/attendance/today");
+  const data = await r.json();
+  if (data.ok) {
+    const rec = data.record;
     let txt = "";
-    if (r.check_in_ts) {
-      txt += `✅ Checked-in at ${new Date(r.check_in_ts).toLocaleTimeString()}<br>`;
-      document.getElementById("checkinBtn").disabled = true;
-      document.getElementById("checkinBtn").classList.add("opacity-50");
+    if (rec && rec.check_in_ts) {
+      txt += `✅ Check-in: ${new Date(rec.check_in_ts).toLocaleTimeString()}<br>`;
+      checkinBtn.disabled = true; checkinBtn.classList.add("opacity-50");
+    } else {
+      checkinBtn.disabled = false; checkinBtn.classList.remove("opacity-50");
     }
-    if (r.check_out_ts) {
-      txt += `🏁 Checked-out at ${new Date(r.check_out_ts).toLocaleTimeString()}<br>`;
-      document.getElementById("checkoutBtn").disabled = true;
-      document.getElementById("checkoutBtn").classList.add("opacity-50");
+    if (rec && rec.check_out_ts) {
+      txt += `🏁 Check-out: ${new Date(rec.check_out_ts).toLocaleTimeString()}<br>`;
+      checkoutBtn.disabled = true; checkoutBtn.classList.add("opacity-50");
+    } else {
+      checkoutBtn.disabled = false; checkoutBtn.classList.remove("opacity-50");
     }
-    if (r.working_hours) txt += `🕒 Total: ${r.working_hours} hours<br>`;
-    txt += `Status: <b>${r.status || 'N/A'}</b><br>`;
-    txt += `Late count this month: ${data.late_count} | Pay-cut days: ${data.paycut_days}`;
-    document.getElementById("summaryText").innerHTML = txt;
+    if (rec && rec.working_hours) txt += `🕒 Total: ${rec.working_hours} hours<br>`;
+    if (rec && rec.status) txt += `Status: <b>${rec.status}</b><br>`;
+    txt += `Lates this month: ${data.late_count} | Pay-cut days: ${data.paycut_days}`;
+    document.getElementById("summaryText").innerHTML = txt || "No attendance yet.";
   } else {
-    document.getElementById("summaryText").innerHTML = "No attendance marked yet.";
+    document.getElementById("summaryText").innerHTML = "No attendance yet.";
   }
 }
 loadStatus();
-setInterval(loadStatus, 30000); // refresh every 30 s
+setInterval(loadStatus, 30000);
 </script>
 {% endblock %}
