@@ -1,4 +1,3 @@
-
 {% extends 'base.html' %}
 {% block c %}
 <h1 class="text-xl font-semibold mb-4">Admin: Attendance Dashboard</h1>
@@ -18,6 +17,7 @@
       <th class="border p-2">Check-out</th>
       <th class="border p-2">Hours</th>
       <th class="border p-2">Photos</th>
+      <th class="border p-2">Remarks</th>
       <th class="border p-2">Map</th>
     </tr>
   </thead>
@@ -37,12 +37,16 @@
           <a href="{{ r.cout_photo }}" target="_blank"><img src="{{ r.cout_photo }}" class="w-16 h-16 object-cover rounded border"></a>
         {% endif %}
       </td>
+      <td class="border p-2">
+        {% if r.cin_remark %}<div><b>IN:</b> {{ r.cin_remark }}</div>{% endif %}
+        {% if r.cout_remark %}<div><b>OUT:</b> {{ r.cout_remark }}</div>{% endif %}
+      </td>
       <td class="border p-2 text-center">
         {% if r.cin_lat %}
-        <a href="https://maps.google.com/?q={{ r.cin_lat }},{{ r.cin_lng }}" target="_blank" class="text-blue-600 underline">Check-in Map</a><br>
+          <a href="https://maps.google.com/?q={{ r.cin_lat }},{{ r.cin_lng }}" target="_blank" class="text-blue-600 underline">IN map</a><br>
         {% endif %}
         {% if r.cout_lat %}
-        <a href="https://maps.google.com/?q={{ r.cout_lat }},{{ r.cout_lng }}" target="_blank" class="text-blue-600 underline">Check-out Map</a>
+          <a href="https://maps.google.com/?q={{ r.cout_lat }},{{ r.cout_lng }}" target="_blank" class="text-blue-600 underline">OUT map</a>
         {% endif %}
       </td>
     </tr>
