@@ -11,7 +11,7 @@ from . import models
 from .security import hash_pw, verify_pw, make_token, SECRET, ALGO
 from sqlalchemy import text
 
-import os
+import os, shutil
 os.makedirs("uploads", exist_ok=True)
 
 
