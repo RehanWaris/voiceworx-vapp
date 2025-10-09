@@ -1,158 +1,134 @@
 {% extends 'base.html' %}
 {% block c %}
-<h1 class="text-xl font-semibold mb-3">Attendance (Today)</h1>
+<h1 class="text-xl font-semibold mb-3">Attendance Portal</h1>
 
-<div class="grid md:grid-cols-2 gap-6">
-  <!-- Live camera & actions -->
-  <div>
-    <div class="text-sm text-gray-600 mb-2">
-      Late after <b>10:31 AM</b>. 4 lates ⇒ 1 pay-cut day (preview below).
-    </div>
-
-    <div class="rounded-xl overflow-hidden bg-black">
-      <video id="cam" autoplay playsinline muted class="w-full h-64 object-cover"></video>
-    </div>
-    <canvas id="snap" class="hidden"></canvas>
-
-    <div class="flex gap-3 mt-3">
-      <button id="btnIn"  class="px-4 py-2 rounded bg-green-600 text-white">Capture Check-in</button>
-      <button id="btnOut" class="px-4 py-2 rounded bg-blue-600  text-white">Capture Check-out</button>
-    </div>
-
-    <div class="text-xs text-gray-500 mt-2" id="geoTip">
-      📍 waiting for GPS…
-    </div>
-  </div>
-
-  <!-- Today status -->
-  <div>
-    <div class="border rounded-xl p-4">
-      <div class="font-semibold mb-2">Today</div>
-      <div id="todayStatus" class="space-y-2">
-        <div>Check-in: <span id="inTime">—</span></div>
-        <img id="inImg"  class="hidden w-40 rounded-lg border" alt="check-in selfie">
-        <div class="pt-2">Check-out: <span id="outTime">—</span></div>
-        <img id="outImg" class="hidden w-40 rounded-lg border" alt="check-out selfie">
-        <div class="pt-2">Total hours: <b id="hours">—</b></div>
-      </div>
-    </div>
-
-    <div class="border rounded-xl p-4 mt-4">
-      <div class="font-semibold mb-2">This month</div>
-      <div>Lates: <b id="lateCount">0</b></div>
-      <div>Pay-cut preview days: <b id="paycut">0</b></div>
-      <div class="pt-2">Your total points: <b id="pointsTotal">0</b></div>
-    </div>
-  </div>
+<div id="statusBox" class="mb-4 text-sm text-gray-700">
+  <p><b>Date:</b> {{ now().strftime("%d %b %Y") if now else '' }}</p>
+  <p id="summaryText">Loading today’s attendance...</p>
 </div>
 
+<div id="videoSection" class="my-3 hidden">
+  <video id="video" autoplay playsinline class="w-64 h-48 border rounded"></video><br>
+  <button id="captureBtn" class="bg-blue-600 text-white px-3 py-1 rounded mt-2">📸 Capture Photo</button>
+</div>
+
+<canvas id="canvas" width="320" height="240" class="hidden"></canvas>
+
+<div id="actions" class="flex gap-3 mt-4">
+  <button id="checkinBtn" class="bg-green-600 text-white px-4 py-2 rounded">Check-In</button>
+  <button id="checkoutBtn" class="bg-red-600 text-white px-4 py-2 rounded">Check-Out</button>
+</div>
+
+<div class="mt-4">
+  <textarea id="remarks" rows="3" placeholder="Optional: add remark or note for today..."
+    class="border w-full rounded p-2 text-sm"></textarea>
+</div>
+
+<div id="result" class="mt-4 text-sm"></div>
+
 <script>
-  const video  = document.getElementById('cam');
-  const canvas = document.getElementById('snap');
-  const btnIn  = document.getElementById('btnIn');
-  const btnOut = document.getElementById('btnOut');
-  const geoTip = document.getElementById('geoTip');
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const captureBtn = document.getElementById("captureBtn");
+let currentAction = null;
+let currentBlob = null;
 
-  const inTime   = document.getElementById('inTime');
-  const outTime  = document.getElementById('outTime');
-  const inImg    = document.getElementById('inImg');
-  const outImg   = document.getElementById('outImg');
-  const hoursEl  = document.getElementById('hours');
-  const lateEl   = document.getElementById('lateCount');
-  const paycutEl = document.getElementById('paycut');
-  const ptsEl    = document.getElementById('pointsTotal');
+// --- Camera setup ---
+async function setupCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    document.getElementById('videoSection').classList.remove('hidden');
+  } catch (err) {
+    alert("Camera access denied. Please allow camera.");
+  }
+}
 
-  let lastPos = { lat: null, lng: null };
+captureBtn.onclick = () => {
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(blob => {
+    currentBlob = blob;
+    document.getElementById('videoSection').classList.add('hidden');
+    document.getElementById('result').innerHTML =
+      `<p class='text-green-700'>Photo captured ✅ Ready to submit.</p>`;
+    submitAttendance();
+  }, "image/jpeg");
+};
 
-  // 1) Start camera (front/selfie)
-  async function initCam() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" }, audio: false
-      });
-      video.srcObject = stream;
-      geoTip.textContent = "📍 getting GPS…";
-    } catch (e) {
-      geoTip.textContent = "⚠️ Camera blocked. Allow camera permissions in your browser settings.";
+// --- Attendance ---
+async function submitAttendance() {
+  if (!currentAction || !currentBlob) return;
+  const formData = new FormData();
+  formData.append("file", currentBlob, `${currentAction}.jpg`);
+  formData.append("lat", window._lat || "");
+  formData.append("lng", window._lng || "");
+  formData.append("remarks", document.getElementById("remarks").value || "");
+
+  const url = `/attendance/${currentAction}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    body: formData
+  });
+  const data = await res.json();
+  if (data.ok) {
+    document.getElementById("result").innerHTML =
+      `<p class='text-blue-700 font-medium'>
+         ${currentAction === 'checkin' ? 'Check-in' : 'Check-out'} successful!<br>
+         Time: ${new Date().toLocaleTimeString()}<br>
+         Points: +${data.points_awarded}
+       </p>`;
+    loadStatus();
+  } else {
+    alert("Error submitting attendance");
+  }
+  currentBlob = null;
+  currentAction = null;
+}
+
+// --- Location ---
+navigator.geolocation.getCurrentPosition(pos => {
+  window._lat = pos.coords.latitude;
+  window._lng = pos.coords.longitude;
+}, () => console.log("Location denied"));
+
+// --- Buttons ---
+document.getElementById("checkinBtn").onclick = () => {
+  currentAction = "checkin";
+  setupCamera();
+};
+document.getElementById("checkoutBtn").onclick = () => {
+  currentAction = "checkout";
+  setupCamera();
+};
+
+// --- Load daily status ---
+async function loadStatus() {
+  const res = await fetch("/attendance/today");
+  const data = await res.json();
+  if (data.ok && data.record) {
+    const r = data.record;
+    let txt = "";
+    if (r.check_in_ts) {
+      txt += `✅ Checked-in at ${new Date(r.check_in_ts).toLocaleTimeString()}<br>`;
+      document.getElementById("checkinBtn").disabled = true;
+      document.getElementById("checkinBtn").classList.add("opacity-50");
     }
-  }
-
-  // 2) Get GPS once (and refresh periodically)
-  function initGPS() {
-    if (!navigator.geolocation) {
-      geoTip.textContent = "⚠️ GPS not available.";
-      return;
+    if (r.check_out_ts) {
+      txt += `🏁 Checked-out at ${new Date(r.check_out_ts).toLocaleTimeString()}<br>`;
+      document.getElementById("checkoutBtn").disabled = true;
+      document.getElementById("checkoutBtn").classList.add("opacity-50");
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        lastPos.lat = pos.coords.latitude;
-        lastPos.lng = pos.coords.longitude;
-        geoTip.textContent = `📍 lat ${lastPos.lat.toFixed(5)}, lng ${lastPos.lng.toFixed(5)}`;
-      },
-      () => { geoTip.textContent = "⚠️ GPS denied. Please allow location."; },
-      { enableHighAccuracy: true, timeout: 8000 }
-    );
+    if (r.working_hours) txt += `🕒 Total: ${r.working_hours} hours<br>`;
+    txt += `Status: <b>${r.status || 'N/A'}</b><br>`;
+    txt += `Late count this month: ${data.late_count} | Pay-cut days: ${data.paycut_days}`;
+    document.getElementById("summaryText").innerHTML = txt;
+  } else {
+    document.getElementById("summaryText").innerHTML = "No attendance marked yet.";
   }
-
-  // 3) Capture current frame as blob
-  function captureBlob() {
-    const w = video.videoWidth || 720;
-    const h = video.videoHeight || 720;
-    canvas.width = w; canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, w, h);
-    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
-  }
-
-  async function send(kind) {
-    const blob = await captureBlob();
-    const fd = new FormData();
-    fd.append('file', blob, `${kind}.jpg`);
-    if (lastPos.lat != null) fd.append('lat', lastPos.lat);
-    if (lastPos.lng != null) fd.append('lng', lastPos.lng);
-
-    const url = kind === 'in' ? '/attendance/checkin' : '/attendance/checkout';
-    const res = await fetch(url, { method: 'POST', body: fd, headers: { 'Accept': 'application/json' }});
-    const data = await res.json();
-
-    if (!data.ok) {
-      alert(data.error || 'Something went wrong');
-      return;
-    }
-    await refreshToday(); // update UI
-  }
-
-  async function refreshToday() {
-    const r = await fetch('/attendance/today');
-    const data = await r.json();
-    if (!data.ok) return;
-
-    const rec = data.record;
-    if (rec) {
-      if (rec.check_in_ts) {
-        inTime.textContent = new Date(rec.check_in_ts).toLocaleString();
-      }
-      if (rec.check_out_ts) {
-        outTime.textContent = new Date(rec.check_out_ts).toLocaleString();
-      }
-      if (rec.check_in_photo) {
-        inImg.src = rec.check_in_photo; inImg.classList.remove('hidden');
-      }
-      if (rec.check_out_photo) {
-        outImg.src = rec.check_out_photo; outImg.classList.remove('hidden');
-      }
-      hoursEl.textContent = rec.working_hours != null ? rec.working_hours.toFixed(2) : '—';
-    }
-    lateEl.textContent   = data.late_count ?? 0;
-    paycutEl.textContent = data.paycut_days ?? 0;
-    ptsEl.textContent    = Math.round(data.points_total ?? 0);
-  }
-
-  btnIn.addEventListener('click',  () => send('in'));
-  btnOut.addEventListener('click', () => send('out'));
-
-  initCam();
-  initGPS();
-  refreshToday();
+}
+loadStatus();
+setInterval(loadStatus, 30000); // refresh every 30 s
 </script>
 {% endblock %}
