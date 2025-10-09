@@ -1,1 +1,158 @@
-{% extends 'base.html' %}{% block c %}<h1 class='text-xl font-semibold mb-3'>Attendance (Today)</h1><div class='text-sm mb-2'>Late after <b>10:31 AM</b>. This month: late=<b>{{ late }}</b>, pay-cut preview days=<b>{{ paycut }}</b>.</div><form method='post' action='/attendance/checkin' enctype='multipart/form-data' class='grid gap-2 mb-4'><input type='hidden' name='lat' id='lat_in'><input type='hidden' name='lng' id='lng_in'><input type='file' name='file' accept='image/*' capture='user' class='border p-2 rounded' required><button class='px-4 py-2 bg-green-600 text-white rounded'>Start Day</button></form><form method='post' action='/attendance/checkout' enctype='multipart/form-data' class='grid gap-2'><input type='hidden' name='lat' id='lat_out'><input type='hidden' name='lng' id='lng_out'><input type='file' name='file' accept='image/*' capture='user' class='border p-2 rounded' required><button class='px-4 py-2 bg-blue-600 text-white rounded'>End Day</button></form><script>function pos(a,b){if(navigator.geolocation){navigator.geolocation.getCurrentPosition(function(p){document.getElementById(a).value=p.coords.latitude;document.getElementById(b).value=p.coords.longitude;});}}pos('lat_in','lng_in');pos('lat_out','lng_out');</script>{% endblock %}
+{% extends 'base.html' %}
+{% block c %}
+<h1 class="text-xl font-semibold mb-3">Attendance (Today)</h1>
+
+<div class="grid md:grid-cols-2 gap-6">
+  <!-- Live camera & actions -->
+  <div>
+    <div class="text-sm text-gray-600 mb-2">
+      Late after <b>10:31 AM</b>. 4 lates ⇒ 1 pay-cut day (preview below).
+    </div>
+
+    <div class="rounded-xl overflow-hidden bg-black">
+      <video id="cam" autoplay playsinline muted class="w-full h-64 object-cover"></video>
+    </div>
+    <canvas id="snap" class="hidden"></canvas>
+
+    <div class="flex gap-3 mt-3">
+      <button id="btnIn"  class="px-4 py-2 rounded bg-green-600 text-white">Capture Check-in</button>
+      <button id="btnOut" class="px-4 py-2 rounded bg-blue-600  text-white">Capture Check-out</button>
+    </div>
+
+    <div class="text-xs text-gray-500 mt-2" id="geoTip">
+      📍 waiting for GPS…
+    </div>
+  </div>
+
+  <!-- Today status -->
+  <div>
+    <div class="border rounded-xl p-4">
+      <div class="font-semibold mb-2">Today</div>
+      <div id="todayStatus" class="space-y-2">
+        <div>Check-in: <span id="inTime">—</span></div>
+        <img id="inImg"  class="hidden w-40 rounded-lg border" alt="check-in selfie">
+        <div class="pt-2">Check-out: <span id="outTime">—</span></div>
+        <img id="outImg" class="hidden w-40 rounded-lg border" alt="check-out selfie">
+        <div class="pt-2">Total hours: <b id="hours">—</b></div>
+      </div>
+    </div>
+
+    <div class="border rounded-xl p-4 mt-4">
+      <div class="font-semibold mb-2">This month</div>
+      <div>Lates: <b id="lateCount">0</b></div>
+      <div>Pay-cut preview days: <b id="paycut">0</b></div>
+      <div class="pt-2">Your total points: <b id="pointsTotal">0</b></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const video  = document.getElementById('cam');
+  const canvas = document.getElementById('snap');
+  const btnIn  = document.getElementById('btnIn');
+  const btnOut = document.getElementById('btnOut');
+  const geoTip = document.getElementById('geoTip');
+
+  const inTime   = document.getElementById('inTime');
+  const outTime  = document.getElementById('outTime');
+  const inImg    = document.getElementById('inImg');
+  const outImg   = document.getElementById('outImg');
+  const hoursEl  = document.getElementById('hours');
+  const lateEl   = document.getElementById('lateCount');
+  const paycutEl = document.getElementById('paycut');
+  const ptsEl    = document.getElementById('pointsTotal');
+
+  let lastPos = { lat: null, lng: null };
+
+  // 1) Start camera (front/selfie)
+  async function initCam() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user" }, audio: false
+      });
+      video.srcObject = stream;
+      geoTip.textContent = "📍 getting GPS…";
+    } catch (e) {
+      geoTip.textContent = "⚠️ Camera blocked. Allow camera permissions in your browser settings.";
+    }
+  }
+
+  // 2) Get GPS once (and refresh periodically)
+  function initGPS() {
+    if (!navigator.geolocation) {
+      geoTip.textContent = "⚠️ GPS not available.";
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        lastPos.lat = pos.coords.latitude;
+        lastPos.lng = pos.coords.longitude;
+        geoTip.textContent = `📍 lat ${lastPos.lat.toFixed(5)}, lng ${lastPos.lng.toFixed(5)}`;
+      },
+      () => { geoTip.textContent = "⚠️ GPS denied. Please allow location."; },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }
+
+  // 3) Capture current frame as blob
+  function captureBlob() {
+    const w = video.videoWidth || 720;
+    const h = video.videoHeight || 720;
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, w, h);
+    return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  }
+
+  async function send(kind) {
+    const blob = await captureBlob();
+    const fd = new FormData();
+    fd.append('file', blob, `${kind}.jpg`);
+    if (lastPos.lat != null) fd.append('lat', lastPos.lat);
+    if (lastPos.lng != null) fd.append('lng', lastPos.lng);
+
+    const url = kind === 'in' ? '/attendance/checkin' : '/attendance/checkout';
+    const res = await fetch(url, { method: 'POST', body: fd, headers: { 'Accept': 'application/json' }});
+    const data = await res.json();
+
+    if (!data.ok) {
+      alert(data.error || 'Something went wrong');
+      return;
+    }
+    await refreshToday(); // update UI
+  }
+
+  async function refreshToday() {
+    const r = await fetch('/attendance/today');
+    const data = await r.json();
+    if (!data.ok) return;
+
+    const rec = data.record;
+    if (rec) {
+      if (rec.check_in_ts) {
+        inTime.textContent = new Date(rec.check_in_ts).toLocaleString();
+      }
+      if (rec.check_out_ts) {
+        outTime.textContent = new Date(rec.check_out_ts).toLocaleString();
+      }
+      if (rec.check_in_photo) {
+        inImg.src = rec.check_in_photo; inImg.classList.remove('hidden');
+      }
+      if (rec.check_out_photo) {
+        outImg.src = rec.check_out_photo; outImg.classList.remove('hidden');
+      }
+      hoursEl.textContent = rec.working_hours != null ? rec.working_hours.toFixed(2) : '—';
+    }
+    lateEl.textContent   = data.late_count ?? 0;
+    paycutEl.textContent = data.paycut_days ?? 0;
+    ptsEl.textContent    = Math.round(data.points_total ?? 0);
+  }
+
+  btnIn.addEventListener('click',  () => send('in'));
+  btnOut.addEventListener('click', () => send('out'));
+
+  initCam();
+  initGPS();
+  refreshToday();
+</script>
+{% endblock %}
