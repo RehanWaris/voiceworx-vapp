@@ -360,3 +360,94 @@ def admin(request: Request):
         return templates.TemplateResponse("admin.html", {"request": request, "user": u, "lb": lb})
     finally:
         d.close()
+
+# -----------------------------------------------------------------------------
+# Admin Attendance Dashboard
+# -----------------------------------------------------------------------------
+from fastapi.responses import FileResponse
+import csv, io
+
+@app.get("/admin/attendance", response_class=HTMLResponse)
+def admin_attendance(request: Request, dt: str = None):
+    u = require_user(request)
+    if u.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    d = SessionLocal()
+    try:
+        if not dt:
+            dt = date.today().isoformat()
+        rows = d.execute(text("""
+            SELECT a.date, u.name, u.email, 
+                   a.cin_ts, a.cout_ts, a.status, 
+                   a.cin_photo, a.cout_photo,
+                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng
+            FROM attendance a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.date = :dt
+            ORDER BY u.name
+        """), {"dt": dt}).fetchall()
+
+        data = []
+        for r in rows:
+            m = r._mapping
+            hrs = None
+            if m.get("cin_ts") and m.get("cout_ts"):
+                t1, t2 = m["cin_ts"], m["cout_ts"]
+                hrs = round((t2 - t1).total_seconds() / 3600, 2)
+            data.append({
+                "name": m["name"], "email": m["email"],
+                "status": m["status"], "date": str(m["date"]),
+                "cin": str(m["cin_ts"] or ""), "cout": str(m["cout_ts"] or ""),
+                "hrs": hrs,
+                "cin_photo": f"/{m['cin_photo']}" if m["cin_photo"] else None,
+                "cout_photo": f"/{m['cout_photo']}" if m["cout_photo"] else None,
+                "cin_lat": m["cin_lat"], "cin_lng": m["cin_lng"],
+                "cout_lat": m["cout_lat"], "cout_lng": m["cout_lng"]
+            })
+
+        return templates.TemplateResponse("admin_attendance.html",
+            {"request": request, "user": u, "date": dt, "rows": data})
+    finally:
+        d.close()
+
+
+@app.get("/admin/attendance/export")
+def admin_attendance_export(request: Request, dt: str = None):
+    u = require_user(request)
+    if u.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if not dt:
+        dt = date.today().isoformat()
+    d = SessionLocal()
+    try:
+        rows = d.execute(text("""
+            SELECT u.name, u.email, a.date, a.status, a.cin_ts, a.cout_ts,
+                   a.cin_lat, a.cin_lng, a.cout_lat, a.cout_lng
+            FROM attendance a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.date = :dt
+            ORDER BY u.name
+        """), {"dt": dt}).fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Name", "Email", "Date", "Status",
+                         "Check-in Time", "Check-out Time",
+                         "Check-in Lat", "Check-in Lng",
+                         "Check-out Lat", "Check-out Lng"])
+        for r in rows:
+            m = r._mapping
+            writer.writerow([
+                m["name"], m["email"], m["date"], m["status"],
+                m["cin_ts"], m["cout_ts"],
+                m["cin_lat"], m["cin_lng"],
+                m["cout_lat"], m["cout_lng"]
+            ])
+        output.seek(0)
+        return FileResponse(io.BytesIO(output.getvalue().encode()),
+                            media_type='text/csv',
+                            filename=f"attendance_{dt}.csv")
+    finally:
+        d.close()
+
